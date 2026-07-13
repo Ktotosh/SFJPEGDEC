@@ -16,11 +16,12 @@ Spawn a digital screen first and then place the chip on it. It will automaticall
 Also set sf_net_burstmax_cl and sf_net_burstrate_cl to something high so the chip won't throw an error.
 
 ## Screenshots
-Basic JPG decoding
+
+### Basic JPG decoding
 ![Example](screenshots/20260713171421_1.jpg)
 
-Lena
+### Lena
 ![Example](screenshots/20260713171813_1.jpg)
 
-Works with custom encoders and quantization tables.
+### Works with custom encoders and quantization tables.
 ![Example](screenshots/20260713173731_1.jpg)
