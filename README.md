@@ -23,5 +23,5 @@ Also set sf_net_burstmax_cl and sf_net_burstrate_cl to something high so the chi
 ### Lena
 ![Example](screenshots/20260713171813_1.jpg)
 
-### Works with custom encoders and quantization tables.
+### Custom encoded images
 ![Example](screenshots/20260713173731_1.jpg)
