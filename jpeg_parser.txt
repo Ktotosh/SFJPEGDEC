@@ -1,0 +1,902 @@
+--@name SFJPEGDEC
+--@author Ktotosh
+--@shared
+--@owneronly 
+
+local FileName = "data/e2files/njpeg.jpg"
+local OpsLimit = 4
+local DCTMode = 1 --1 - AAN IDCT, 0 - Naive IDCT
+local Logo = true
+local chunkSize = 60000 --net message size. Dont put this above  65000
+
+local zigzag = {
+    {1,1},{1,2},{2,1},{3,1},{2,2},{1,3},{1,4},{2,3},
+    {3,2},{4,1},{5,1},{4,2},{3,3},{2,4},{1,5},{1,6},
+    {2,5},{3,4},{4,3},{5,2},{6,1},{7,1},{6,2},{5,3},
+    {4,4},{3,5},{2,6},{1,7},{1,8},{2,7},{3,6},{4,5},
+    {5,4},{6,3},{7,2},{8,1},{8,2},{7,3},{6,4},{5,5},
+    {4,6},{3,7},{2,8},{3,8},{4,7},{5,6},{6,5},{7,4},
+    {8,3},{8,4},{7,5},{6,6},{5,7},{4,8},{5,8},{6,7},
+    {7,6},{8,5},{8,6},{7,7},{6,8},{7,8},{8,7},{8,8}
+}
+
+--I want a logo so it looks cool
+
+local wm = [[
+------------------------------------------------------------------------
+------------------------------------------------------------------------
+----####--######----##--####----######----####--####----######----####--
+---#####--######----##--#####---######---#####--#####---######---#####--
+--##------##--------##--##--##--##------##------##--##--##------##------
+--###-----##--------##--##--##--##------##------##--##--##------##------
+---###----####------##--#####---######--##-###--##--##--######--##------
+----###---####------##--####----######--##-###--##--##--######--##------
+-----###--##----##--##--##------##------##--##--##--##--##------##------
+------##--##----##--##--##------##------##--##--##--##--##------##------
+--#####---##-----#####--##------######---#####--#####---######---#####--
+--####----##------###---##------######----####--####----######----####--
+------------------------------------------------------------------------
+------------------------------------------------------------------------
+]]
+
+
+local wm1 = [[
+------------------------------------
+--##-###--#-##--###--##-##--###--##-
+-#---#----#-#-#-#---#---#-#-#---#---
+--#--##---#-##--###-#-#-#-#-###-#---
+---#-#--#-#-#---#---#-#-#-#-#---#---
+-##--#---#--#---###--##-##--###--##-
+------------------------------------
+]]
+
+if CLIENT then  
+    local function extract_scan_data(file_data, start_pos)
+        local scan = {} 
+        local pos = start_pos
+   
+        local len = #file_data
+        while pos <= len do
+            local b = string.byte(file_data, pos)
+            if b == 0xFF then
+                local next_pos = pos + 1
+                while next_pos <= len and string.byte(file_data, next_pos) == 0xFF do
+  
+                    next_pos = next_pos + 1
+                end
+                if next_pos > len then break end
+                
+                local marker = string.byte(file_data, next_pos)
+    
+                if marker == 0x00 then
+                    table.insert(scan, "\xFF")
+                    pos = next_pos + 1
+                elseif marker == 0xD9 then
+                   
+                    break
+                elseif marker >= 0xD0 and marker <= 0xD7 then
+                    pos = next_pos + 1
+                else
+                    break
+               
+                end
+            else
+                table.insert(scan, string.char(b))
+                pos = pos + 1
+            end
+        end
+        return table.concat(scan)
+    end
+
+    function read_start_of_frame(file_data, pos)
+        local length = 
+        string.byte(file_data, pos) * 256 + string.byte(file_data, pos+1)
+        local precision = string.byte(file_data, pos+2)
+        local height = string.byte(file_data, pos+3)*256 + string.byte(file_data, pos+4)
+        local width = string.byte(file_data, pos+5)*256 + string.byte(file_data, pos+6)
+        
+        if width * height > 786432 then
+            print("[CLIENT] Image too large!")
+            return nil
+  
+        end
+        
+        local num_components = string.byte(file_data, pos+7)
+        local current_pos = pos + 8
+        
+        local components = {}
+        for i=1,num_components do
+            local id = string.byte(file_data, current_pos)
+            local samp = string.byte(file_data, 
+            current_pos+1)
+            local qt_id = string.byte(file_data, current_pos+2)
+            components[id] = {
+                h_samp = bit.rshift(samp, 4),
+                v_samp = bit.band(samp, 0x0F),
+                qt_id = qt_id
+            }
+  
+            current_pos = current_pos + 3
+        end
+        print(string.format("[CLIENT] SOF: %dx%d, precision: %d, components: %d", width, height, precision, num_components))
+        return { size=length, width=width, height=height, components=components }
+    end
+
+    function define_quantization_table(file_data, pos)
+        local length = string.byte(file_data, pos)*256 + string.byte(file_data, pos+1)
+        local tables = {}
+        local current_pos 
+        = pos + 2
+        local bytes_left = length - 2
+        while bytes_left > 0 do
+            local temp = string.byte(file_data, current_pos);
+            current_pos=current_pos+1
+            local dest_id = bit.band(temp,0x0F)
+            local table_8x8 = {}
+            for i=1,64 do
+                local r,c = zigzag[i][1], zigzag[i][2]
+                table_8x8[r] = table_8x8[r] or {}
+                
+                table_8x8[r][c] = string.byte(file_data, current_pos)
+                current_pos = current_pos + 1
+            end
+            bytes_left = bytes_left - 65
+            table.insert(tables, { dest_id=dest_id, table=table_8x8 })
+        end
+        return { size=length, tables=tables }
+    end
+
+    function define_huffman_table(file_data, pos)
+   
+        local length = string.byte(file_data, pos)*256 + string.byte(file_data, pos+1)
+        local tables = {}
+        local current_pos = pos + 2
+        local bytes_left = length - 2
+        while bytes_left > 0 do
+            local temp = string.byte(file_data, current_pos);
+            current_pos=current_pos+1
+            local table_class = bit.rshift(temp,4)
+            local dest_id = bit.band(temp,0x0F)
+            local counts = {}
+            local total_symbols = 0
+            for i=1,16 do
+                counts[i] = string.byte(file_data, current_pos)
+       
+                total_symbols = total_symbols + counts[i]
+                current_pos = current_pos+1
+            end
+            local decode_table = {}
+            local code = 0
+            for len=1,16 do
+             
+                decode_table[len] = {}
+                for j=1,counts[len] do
+                    local symbol = string.byte(file_data, current_pos)
+                    current_pos = current_pos+1
+                    decode_table[len][code] = symbol
+         
+                    code = code + 1
+                end
+                code = code * 2
+            end
+            bytes_left = bytes_left - (17 + total_symbols)
+            table.insert(tables, { table_class=table_class, dest_id=dest_id, decode_table=decode_table })
+  
+        end
+        return { size=length, tables=tables }
+    end
+
+    function read_start_of_scan(file_data, pos)
+        local length = string.byte(file_data, pos)*256 + string.byte(file_data, pos+1)
+        local current_pos = pos + 2
+        local num_scan_components = string.byte(file_data, current_pos);
+        current_pos=current_pos+1
+        local components = {}
+        for i=1,num_scan_components do
+            local selector = string.byte(file_data, current_pos)
+            local temp = string.byte(file_data, current_pos+1)
+            current_pos = current_pos + 2
+            table.insert(components, { selector=selector, dc_table=bit.rshift(temp,4), ac_table=bit.band(temp,0x0F) })
+        end
+      
+        return { size=length, components=components }
+    end
+
+    local File = file.readInGame(FileName)
+    
+    timer.simple(1, function()
+        if not File or string.byte(File,1)~=0xFF or string.byte(File,2)~=0xD8 then
+            print('[CLIENT] Invalid JPEG')
+            return
+        end
+        
+        print('[CLIENT] Valid JPEG')
+
+       
+        local pos = 3
+        local huff_tables = {}
+        local quant_tables = {}
+        local frame_info = {}
+        local scan_info = {}
+        local scan_data_raw = nil
+        local restart_interval = 0
+
+        while pos <= #File do
+   
+            local b = string.byte(File, pos)
+            if b == 0xFF then
+                while pos <= #File and string.byte(File, pos) == 0xFF do
+                    pos = pos + 1
+                end
+      
+                if pos > #File then break end
+                local marker = string.byte(File, pos)
+                pos = pos + 1
+
+                if marker == 0xD9 then 
+                    break
+   
+                elseif marker == 0xD8 then
+
+                elseif marker == 0xDD then
+                    local length = string.byte(File, pos)*256 + string.byte(File, pos+1)
+                    restart_interval = string.byte(File, pos+2)*256 + string.byte(File, pos+3)
+          
+                    pos = pos + length
+                elseif marker >= 0xC0 and marker <= 0xCF and marker ~= 0xC4 and marker ~= 0xC8 then
+                    frame_info = read_start_of_frame(File, pos)
+                    pos = pos + frame_info.size
+       
+                elseif marker == 0xDB then
+                    local qt = define_quantization_table(File, pos)
+                    for _,t in ipairs(qt.tables) do table.insert(quant_tables, t) end
+                    pos = pos + qt.size
+            
+                elseif marker == 0xC4 then
+                    local ht = define_huffman_table(File, pos)
+                    for _,t in ipairs(ht.tables) do table.insert(huff_tables, t) end
+                    pos = pos + ht.size
+                elseif 
+                marker == 0xDA then
+                    scan_info = read_start_of_scan(File, pos)
+                    pos = pos + scan_info.size
+                    scan_data_raw = extract_scan_data(File, pos)
+                    break
+       
+                else
+                    local length = string.byte(File, pos)*256 + string.byte(File, pos+1)
+                    pos = pos + length
+                end
+            else
+            
+                pos = pos + 1
+            end
+        end
+
+        if scan_data_raw and #scan_data_raw > 0 then
+            print(string.format("[CLIENT] ScanInfo: width: %d, height: %d", frame_info.width, frame_info.height))
+            
+            net.start("JPEGMeta")
+               
+                net.writeUInt(frame_info.width, 32)
+                net.writeUInt(frame_info.height, 32)
+                net.writeUInt(#scan_info.components, 4)
+                for _, sc in ipairs(scan_info.components) do
+                    local fc = frame_info.components[sc.selector]
+                    
+                    net.writeUInt(sc.selector, 8)
+                    net.writeUInt(fc.h_samp, 4)
+                    net.writeUInt(fc.v_samp, 4)
+                    net.writeUInt(fc.qt_id, 4)
+                    net.writeUInt(sc.dc_table, 4)
+               
+                    net.writeUInt(sc.ac_table, 4)
+                end
+                net.writeUInt(#quant_tables, 4)
+                for _, tbl in ipairs(quant_tables) do
+                    net.writeUInt(tbl.dest_id, 4)
+                   
+                    for r=1,8 do for c=1,8 do net.writeUInt(tbl.table[r][c], 16) end end
+                end
+                net.writeUInt(#huff_tables, 4)
+                for _, tbl in ipairs(huff_tables) do
+                    net.writeUInt(tbl.table_class, 4)
+               
+                    net.writeUInt(tbl.dest_id, 4)
+                    for bits=1,16 do
+                        local count = 0
+                        for _,_ in pairs(tbl.decode_table[bits] or {}) do count = count + 1 end
+         
+                        net.writeUInt(count, 8)
+                        for code, symbol in pairs(tbl.decode_table[bits] or {}) do
+                            net.writeUInt(code, 16)
+                        
+                            net.writeUInt(symbol, 8)
+                        end
+                    end
+                end
+                net.writeUInt(restart_interval, 16)
+               
+                net.writeUInt(#scan_data_raw, 32)
+            net.send()
+
+            local chunks = math.ceil(#scan_data_raw / chunkSize)
+            local curChunk = 1
+            timer.create("JPEGChnk", 0.5, chunks, function()
+                local dataStr = string.sub(scan_data_raw, (curChunk-1)*chunkSize+1, curChunk*chunkSize)
+   
+                net.start("JPEGScan")
+                    net.writeUInt(#dataStr, 32)
+                    net.writeData(dataStr, #dataStr)
+                net.send()
+                curChunk = curChunk + 1
+         
+            end)
+        end
+    end)
+end
+
+if SERVER then
+    local digiscreen = chip():isWeldedTo()
+    if not digiscreen or digiscreen:getClass() ~= "gmod_wire_digitalscreen" then 
+        print("[SERVER] Welded entity is not a digital screen")
+        return 
+    end
+    local screen = digiscreen:getWirelink()
+    screen[1048569] = 2
+    screen[1048574] = 1
+
+    local ScanData = ""
+    local ExpectedScanLen = 0
+   
+    local Meta = { width=0, height=0, components={} }
+    local QuantTables = {}
+    local HuffTables = { [0]={}, [1]={} }
+    local DecodeTime = 0
+
+    local input_pos = 1
+    local current_byte = 0
+    local bits_remaining = 0
+    local IsDecoding = false
+    local MCU_Index = 0
+    local Predictions = {}
+    local RestartInterval = 0
+    local Max_H_Samp, Max_V_Samp, MCU_Size_X, MCU_Size_Y, Num_MCU_X, Num_MCU_Y = 1,1,8,8,0,0
+    
+   
+    local T1D = {}
+    for pixel = 1, 8 do
+        T1D[pixel] = {}
+        local p_idx = pixel - 1
+        for freq = 1, 8 do
+            local f_idx = freq - 1
+            local c = (f_idx == 0) and (1 / math.sqrt(2)) or 1
+           
+            T1D[pixel][freq] = 0.5 * c * math.cos((2 * p_idx + 1) * f_idx * math.pi / 16)
+        end
+    end
+
+    local inter_mat = {}
+    for i = 1, 8 do inter_mat[i] = {} end
+    
+    -- AAN IDCT referenced by
+    -- https://codereview.stackexchange.com/q/265527
+    local M_PI = math.pi
+    local m0 = 2.0 * math.cos(1.0/16.0 * 2.0 * M_PI)
+    local m1 = 2.0 * math.cos(2.0/16.0 * 2.0 * M_PI)
+    local m3 = 2.0 * math.cos(2.0/16.0 * 2.0 * M_PI)
+    local m5 = 2.0 * math.cos(3.0/16.0 * 2.0 * M_PI)
+    local m2 = m0 - m5
+    local m4 = m0 + m5
+
+    local s0 = math.cos(0.0/16.0 * M_PI) / math.sqrt(8)
+    local s1 = math.cos(1.0/16.0 * M_PI) / 2.0
+    local s2 = math.cos(2.0/16.0 * M_PI) / 2.0
+    local s3 = math.cos(3.0/16.0 * M_PI) / 2.0
+    local s4 = math.cos(4.0/16.0 * M_PI) / 2.0
+ 
+    local s5 = math.cos(5.0/16.0 * M_PI) / 2.0
+    local s6 = math.cos(6.0/16.0 * M_PI) / 2.0
+    local s7 = math.cos(7.0/16.0 * M_PI) / 2.0
+
+    local function IDCT2(comp)
+        for i = 0, 7 do
+            local g0 = comp[0*8 + i + 1] * s0
+            local g1 = comp[4*8 + i + 1] * s4
+       
+            local g2 = comp[2*8 + i + 1] * s2
+            local g3 = comp[6*8 + i + 1] * s6
+            local g4 = comp[5*8 + i + 1] * s5
+            local g5 = comp[1*8 + i + 1] * s1
+            local g6 = comp[7*8 + i + 1] * s7
+  
+            local g7 = comp[3*8 + i + 1] * s3
+            
+            local f0 = g0
+            local f1 = g1
+            local f2 = g2
+            local f3 = g3
+         
+            local f4 = g4 - g7
+            local f5 = g5 + g6
+            local f6 = g5 - g6
+            local f7 = g4 + g7
+            
+            local e0 = f0
+            local e1 
+            = f1
+            local e2 = f2 - f3
+            local e3 = f2 + f3
+            local e4 = f4
+            local e5 = f5 - f7
+            local e6 = f6
+            local e7 = f5 + f7
+ 
+            local e8 = f4 + f6
+            
+            local d0 = e0
+            local d1 = e1
+            local d2 = e2 * m1
+            local d3 = e3
+          
+            local d4 = e4 * m2
+            local d5 = e5 * m3
+            local d6 = e6 * m4
+            local d7 = e7
+            local d8 = e8 * m5
+            
+            local c0 = 
+            d0 + d1
+            local c1 = d0 - d1
+            local c2 = d2 - d3
+            local c3 = d3
+            local c4 = d4 + d8
+            local c5 = d5 + d7
+            local c6 = 
+            d6 - d8
+            local c7 = d7
+            local c8 = c5 - c6
+            
+            local b0 = c0 + c3
+            local b1 = c1 + c2
+            local b2 = c1 - c2
+   
+            local b3 = c0 - c3
+            local b4 = c4 - c8
+            local b5 = c8
+            local b6 = c6 - c7
+            local b7 = c7
+            
+          
+            comp[0*8 + i + 1] = b0 + b7
+            comp[1*8 + i + 1] = b1 + b6
+            comp[2*8 + i + 1] = b2 + b5
+            comp[3*8 + i + 1] = b3 + b4
+            comp[4*8 + i + 1] = b3 - b4
+          
+            comp[5*8 + i + 1] = b2 - b5
+            comp[6*8 + i + 1] = b1 - b6
+            comp[7*8 + i + 1] = b0 - b7 
+        end
+
+        for i = 0, 7 do
+            local base = i * 8
+           
+            local g0 = comp[base + 0 + 1] * s0
+            local g1 = comp[base + 4 + 1] * s4
+            local g2 = comp[base + 2 + 1] * s2
+            local g3 = comp[base + 6 + 1] * s6
+            local g4 = comp[base + 5 + 1] * s5
+      
+            local g5 = comp[base + 1 + 1] * s1
+            local g6 = comp[base + 7 + 1] * s7
+            local g7 = comp[base + 3 + 1] * s3
+            
+            local f0 = g0
+            local f1 = g1
+ 
+            local f2 = g2
+            local f3 = g3
+            local f4 = g4 - g7
+            local f5 = g5 + g6
+            local f6 = g5 - g6
+            local f7 = g4 + g7
+   
+            
+            local e0 = f0
+            local e1 = f1
+            local e2 = f2 - f3
+            local e3 = f2 + f3
+            local e4 = f4
+            
+            local e5 = f5 - f7
+            local e6 = f6
+            local e7 = f5 + f7
+            local e8 = f4 + f6
+            
+            local d0 = e0
+            local d1 = e1
+    
+            local d2 = e2 * m1
+            local d3 = e3
+            local d4 = e4 * m2
+            local d5 = e5 * m3
+            local d6 = e6 * m4
+            local d7 = e7
+      
+            local d8 = e8 * m5
+            
+            local c0 = d0 + d1
+            local c1 = d0 - d1
+            local c2 = d2 - d3
+            local c3 = d3
+           
+            local c4 = d4 + d8
+            local c5 = d5 + d7
+            local c6 = d6 - d8
+            local c7 = d7
+            local c8 = c5 - c6
+            
+            local b0 = c0 
+            + c3
+            local b1 = c1 + c2
+            local b2 = c1 - c2
+            local b3 = c0 - c3
+            local b4 = c4 - c8
+            local b5 = c8
+            local b6 = c6 
+            - c7
+            local b7 = c7
+            
+            comp[base + 0 + 1] = b0 + b7
+            comp[base + 1 + 1] = b1 + b6
+            comp[base + 2 + 1] = b2 + b5
+            
+            comp[base + 3 + 1] = b3 + b4
+            comp[base + 4 + 1] = b3 - b4
+            comp[base + 5 + 1] = b2 - b5
+            comp[base + 6 + 1] = b1 - b6
+            comp[base + 7 + 1] = b0 - b7
+        end
+    
+    end
+
+    local function read_bit()
+        if bits_remaining <= 0 then
+            if input_pos > #ScanData then return 0 end
+            current_byte = string.byte(ScanData, input_pos)
+            input_pos = input_pos + 1
+            bits_remaining = 8
+        end
+        bits_remaining = 
+        bits_remaining - 1
+        return bit.band(bit.rshift(current_byte, bits_remaining), 1)
+    end
+
+    local function read_bits(n)
+        if n==0 then return 0 end
+        local res = 0
+        for i=1,n do res = bit.lshift(res,1) + read_bit() end
+        return res
+    end
+
+    local function get_signed_value(bits, num_bits)
+        if num_bits==0 then return 0 end
+    
+        local half = bit.lshift(1, num_bits-1)
+        if bits < half then return bits - bit.lshift(1, num_bits) + 1 end
+        return bits
+    end
+
+    local function huff_decode(h_table)
+        local code = 0
+        for len=1,16 do
+            code = bit.lshift(code,1) + read_bit()
+            if h_table[len] and h_table[len][code] 
+            ~= nil then
+                return h_table[len][code]
+            end
+        end
+        return nil
+    end
+
+    net.receive("JPEGMeta", function()
+        Meta.width = net.readUInt(32)
+        Meta.height = net.readUInt(32)
+        local numComps = net.readUInt(4)
+        Meta.components = {}
+  
+        Max_H_Samp, Max_V_Samp = 1, 1
+        for i=1,numComps do
+             local comp = {
+                id = net.readUInt(8),
+                h_samp = net.readUInt(4),
+                v_samp = net.readUInt(4),
+          
+                qt_id = net.readUInt(4),
+                dc_id = net.readUInt(4),
+                ac_id = net.readUInt(4)
+            }
+            if comp.h_samp > Max_H_Samp then Max_H_Samp = comp.h_samp end
+            if comp.v_samp > Max_V_Samp then Max_V_Samp = comp.v_samp end
+    
+            table.insert(Meta.components, comp)
+            Predictions[i] = 0
+        end
+        MCU_Size_X = 8 * Max_H_Samp
+        MCU_Size_Y = 8 * Max_V_Samp
+        Num_MCU_X = math.ceil(Meta.width / MCU_Size_X)
+        Num_MCU_Y = math.ceil(Meta.height / MCU_Size_Y)
+
+        local numQT = net.readUInt(4)
+        for i=1,numQT 
+        do
+            local id = net.readUInt(4)
+            QuantTables[id] = {}
+            for r=1,8 do
+                QuantTables[id][r] = {}
+                for c=1,8 do QuantTables[id][r][c] = net.readUInt(16) end
+            end
+     
+        end
+
+        local numHT = net.readUInt(4)
+        for i=1,numHT do
+            local class = net.readUInt(4)
+            local id = net.readUInt(4)
+            HuffTables[class][id] = {}
+            for bits=1,16 do
+                local count 
+                = net.readUInt(8)
+                HuffTables[class][id][bits] = {}
+                for j=1,count do
+                    local code = net.readUInt(16)
+                    local sym = net.readUInt(8)
+                 
+                    HuffTables[class][id][bits][code] = sym
+                end
+            end
+        end
+
+        RestartInterval = net.readUInt(16)
+        ExpectedScanLen = net.readUInt(32)
+        print("[SERVER] Expected scan size: ".. ExpectedScanLen.. " bytes")
+    end)
+
+    net.receive("JPEGScan", function()
+        local len = net.readUInt(32)
+    
+        ScanData = ScanData .. net.readData(len)
+        if #ScanData >= ExpectedScanLen then
+            input_pos = 1
+            bits_remaining = 0
+            MCU_Index = 0
+            timer.simple(1,function()
+                IsDecoding = true
+        
+                DecodeTime = timer.curtime()
+            end)
+            screen[1048573] = Meta.width
+            screen[1048572] = Meta.height
+            print("[SERVER] Decoding started")
+        end
+    end)
+
+    --Decoding MCUs individually prevents the chip from crashing.
+    local function decode_mcu()
+        if MCU_Index >= Num_MCU_X * Num_MCU_Y then return false end
+ 
+        if RestartInterval > 0 and MCU_Index > 0 and (MCU_Index % RestartInterval == 0) then
+            bits_remaining = 0
+            for i = 1, #Meta.components do
+                Predictions[i] = 0
+            end
+        end
+
+        local mcu_row 
+        = math.floor(MCU_Index / Num_MCU_X)
+        local mcu_col = MCU_Index % Num_MCU_X
+        MCU_Index = MCU_Index + 1
+
+        local MCU_Data = {}
+
+        for comp_idx, comp in ipairs(Meta.components) do
+            local qt = QuantTables[comp.qt_id]
+            local h_dc = HuffTables[0][comp.dc_id]
+            local h_ac = HuffTables[1][comp.ac_id]
+
+   
+            local comp_w = 8 * comp.h_samp
+            local comp_h = 8 * comp.v_samp
+            local comp_matrix = {}
+            for r=0,comp_h-1 do comp_matrix[r] = {} end
+
+            for du_row=0,comp.v_samp-1 do
+                for du_col=0,comp.h_samp-1 do
+    
+                    local cat = huff_decode(h_dc)
+                    if cat == nil then return false end
+                    local diff = get_signed_value(read_bits(cat), cat)
+                    Predictions[comp_idx] = Predictions[comp_idx] + diff
+
+      
+                    local coeff = {}
+                    for i=1,64 do coeff[i] = 0 end
+                    coeff[1] = Predictions[comp_idx]
+
+                    local k = 2
+            
+                    while k <= 64 do
+                        local rs = huff_decode(h_ac)
+                        if rs == nil or rs == 0 then break end
+                        local run = 
+                        bit.rshift(rs, 4)
+                        local size = bit.band(rs, 15)
+                        if size == 0 then
+                            if run == 15 then k = k + 16 else break end
+   
+                        else
+                            k = k + run
+                            if k <= 64 then
+               
+                                coeff[k] = get_signed_value(read_bits(size), size)
+                            end
+                            k = k + 1
+                    
+                        end
+                    end
+
+                    if DCTMode == 1 then
+                        local aan_block = {}
+                        for 
+                        i=1,64 do aan_block[i] = 0 end
+
+                        for i=1,64 do
+                            local r,c = zigzag[i][1], zigzag[i][2]
+                            aan_block[(r-1)*8 + c] = coeff[i] * qt[r][c]
+   
+                        end
+
+                        IDCT2(aan_block)
+
+                        local base_y = du_row * 8
+                        local base_x 
+                        = du_col * 8
+                        for y = 1, 8 do
+                            local row_out = comp_matrix[base_y + y - 1]
+                            local base_aan = (y - 
+                            1) * 8
+                            for x = 1, 8 do
+                                row_out[base_x + x - 1] = aan_block[base_aan + x]
+                         
+                            end
+                        end
+                    else
+                        local dct_mat = {}
+                        for y=1,8 
+                        do dct_mat[y] = {} end
+                        
+                        for i=1,64 do
+                            local r,c = zigzag[i][1], zigzag[i][2]
+              
+                            dct_mat[r][c] = coeff[i] * qt[r][c]
+                        end
+
+                        for y = 1, 8 do
+                            local 
+                            row = inter_mat[y]
+                            row[1],row[2],row[3],row[4],row[5],row[6],row[7],row[8] = 0,0,0,0,0,0,0,0
+                        end
+                        
+                    
+                        for u = 1, 8 do
+                            for v = 1, 8 do
+                                local c = dct_mat[v][u]
+                       
+                                if c ~= 0 then
+                                    for y = 1, 8 do
+                                        inter_mat[y][u] = inter_mat[y][u] + c * T1D[y][v]
+                                    end
+                                end
+                            end
+    
+                        end
+
+                        local base_y = du_row * 8
+                        local base_x = du_col * 8
+                      
+                        for y = 1, 8 do
+                            local row_out = comp_matrix[base_y + y - 1]
+                            local inter_row = inter_mat[y]
+                           
+                            local i1, i2, i3, i4, i5, i6, i7, i8 = inter_row[1], inter_row[2], inter_row[3], inter_row[4], inter_row[5], inter_row[6], inter_row[7], inter_row[8]
+                            for x = 1, 8 do
+                                local tx = T1D[x]
+              
+                                row_out[base_x + x - 1] = i1 * tx[1] + i2 * tx[2] + i3 * tx[3] + i4 * tx[4] + i5 * tx[5] + i6 * tx[6] + i7 * tx[7] + i8 * tx[8]
+                            end
+                  
+                        end
+                    end
+
+                end
+            end
+            table.insert(MCU_Data, { matrix=comp_matrix, h_samp=comp.h_samp, v_samp=comp.v_samp })
+        end
+
+        local base_y = mcu_row * MCU_Size_Y
+        
+        local base_x = mcu_col * MCU_Size_X
+        local max_h = math.min(MCU_Size_Y, Meta.height - base_y)
+        local max_w = math.min(MCU_Size_X, Meta.width - base_x)
+
+        local is_grayscale = (#Meta.components == 1)
+
+        for y=0,max_h-1 do
+            for x=0,max_w-1 do
+                local r, g, b
+           
+                if is_grayscale then
+                    local cy_y = MCU_Data[1].matrix[math.floor(y * MCU_Data[1].v_samp / Max_V_Samp)][math.floor(x * MCU_Data[1].h_samp / Max_H_Samp)]
+                    local gray = math.clamp(cy_y + 128, 0, 255)
+                    r, g, b = gray, gray, gray
+         
+                else
+                    local cy_y = MCU_Data[1].matrix[math.floor(y * MCU_Data[1].v_samp / Max_V_Samp)][math.floor(x * MCU_Data[1].h_samp / Max_H_Samp)]
+                    local cb_y = MCU_Data[2].matrix[math.floor(y * MCU_Data[2].v_samp / Max_V_Samp)][math.floor(x * MCU_Data[2].h_samp / Max_H_Samp)]
+                    local cr_y = MCU_Data[3].matrix[math.floor(y * MCU_Data[3].v_samp / Max_V_Samp)][math.floor(x * MCU_Data[3].h_samp / 
+                    Max_H_Samp)]
+
+                    r = math.clamp(cy_y + 1.402 * cr_y + 128, 0, 255)
+                    g = math.clamp(cy_y - 0.344136 * cb_y - 0.714136 * cr_y + 128, 0, 255)
+                    b = math.clamp(cy_y + 1.772 * cb_y + 128, 0, 255)
+      
+                end
+                screen[(base_y + y) * Meta.width + (base_x + x)] = math.floor(r)*65536 + math.floor(g)*256 + math.floor(b)
+             end
+        end
+        return true
+    end
+
+    hook.add("tick", "JPEGDraw", function()
+        if not IsDecoding then return end
+       
+        while cpuAverage() * 1000 < OpsLimit do
+            if not decode_mcu() then
+                IsDecoding = false
+                local DTime = math.round( (timer.curtime()-DecodeTime)*1000)
+                print("[SERVER] Finished drawing image in ".. DTime.. "ms")
+                
+                if Logo then   
+                    local chosen_wm, wm_w, wm_h
+                    if Meta.width >= 144 and Meta.height >= 56 then
+                        chosen_wm = wm
+                        wm_w, wm_h = 72, 14
+                    elseif Meta.width >= 36 and Meta.height >= 28 then
+                        chosen_wm = wm1
+                        wm_w, wm_h = 36, 7
+                    end   
+                    if chosen_wm then
+                        local start_y = Meta.height - wm_h
+                        local cur_y = 0
+                        for line in string.gmatch(chosen_wm, "[^\r\n]+") do
+                            if cur_y >= wm_h then break end
+                            for cur_x = 1, #line do
+                                if cur_x > wm_w then break end
+                                local char = string.sub(line, cur_x, cur_x)
+                                local color = (char == "#") and 0xFFFFFF or 0x000000
+                                
+                                local px = cur_x - 1
+                                local py = start_y + cur_y
+                                screen[py * Meta.width + px] = color
+                            end
+                            cur_y = cur_y + 1
+                        end
+                    end
+                end
+                
+                break
+            end
+        end
+    end)
+end
