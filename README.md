@@ -17,4 +17,4 @@ Also set sf_net_burstmax_cl and sf_net_burstrate_cl to something high so the chi
 
 ## Screenshots
 Basic JPG decoding
-![Example](https://raw.githubusercontent.com/Ktotosh/SFJPEGDEC/refs/heads/main/screenshots/20260713171421_1.jpg)
+![Example](screenshots/20260713171421_1.jpg)
