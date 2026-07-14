@@ -61,24 +61,19 @@ if CLIENT then
             if b == 0xFF then
                 local next_pos = pos + 1
                 while next_pos <= len and string.byte(file_data, next_pos) == 0xFF do
-  
                     next_pos = next_pos + 1
                 end
                 if next_pos > len then break end
-                
                 local marker = string.byte(file_data, next_pos)
-    
                 if marker == 0x00 then
                     table.insert(scan, "\xFF")
                     pos = next_pos + 1
                 elseif marker == 0xD9 then
-                   
                     break
                 elseif marker >= 0xD0 and marker <= 0xD7 then
                     pos = next_pos + 1
                 else
                     break
-               
                 end
             else
                 table.insert(scan, string.char(b))
@@ -100,10 +95,8 @@ if CLIENT then
             return nil
   
         end
-        
         local num_components = string.byte(file_data, pos+7)
         local current_pos = pos + 8
-        
         local components = {}
         for i=1,num_components do
             local id = string.byte(file_data, current_pos)
@@ -147,7 +140,6 @@ if CLIENT then
     end
 
     function define_huffman_table(file_data, pos)
-   
         local length = string.byte(file_data, pos)*256 + string.byte(file_data, pos+1)
         local tables = {}
         local current_pos = pos + 2
@@ -211,8 +203,6 @@ if CLIENT then
         end
         
         print('[CLIENT] Valid JPEG')
-
-       
         local pos = 3
         local huff_tables = {}
         local quant_tables = {}
@@ -222,7 +212,6 @@ if CLIENT then
         local restart_interval = 0
 
         while pos <= #File do
-   
             local b = string.byte(File, pos)
             if b == 0xFF then
                 while pos <= #File and string.byte(File, pos) == 0xFF do
@@ -235,88 +224,71 @@ if CLIENT then
 
                 if marker == 0xD9 then 
                     break
-   
                 elseif marker == 0xD8 then
-
                 elseif marker == 0xDD then
                     local length = string.byte(File, pos)*256 + string.byte(File, pos+1)
                     restart_interval = string.byte(File, pos+2)*256 + string.byte(File, pos+3)
-          
                     pos = pos + length
                 elseif marker >= 0xC0 and marker <= 0xCF and marker ~= 0xC4 and marker ~= 0xC8 then
                     frame_info = read_start_of_frame(File, pos)
                     pos = pos + frame_info.size
-       
                 elseif marker == 0xDB then
                     local qt = define_quantization_table(File, pos)
                     for _,t in ipairs(qt.tables) do table.insert(quant_tables, t) end
                     pos = pos + qt.size
-            
                 elseif marker == 0xC4 then
                     local ht = define_huffman_table(File, pos)
                     for _,t in ipairs(ht.tables) do table.insert(huff_tables, t) end
                     pos = pos + ht.size
-                elseif 
-                marker == 0xDA then
+                elseif marker == 0xDA then
                     scan_info = read_start_of_scan(File, pos)
                     pos = pos + scan_info.size
                     scan_data_raw = extract_scan_data(File, pos)
                     break
-       
                 else
                     local length = string.byte(File, pos)*256 + string.byte(File, pos+1)
                     pos = pos + length
                 end
             else
-            
                 pos = pos + 1
             end
         end
 
         if scan_data_raw and #scan_data_raw > 0 then
             print(string.format("[CLIENT] ScanInfo: width: %d, height: %d", frame_info.width, frame_info.height))
-            
             net.start("JPEGMeta")
-               
                 net.writeUInt(frame_info.width, 32)
                 net.writeUInt(frame_info.height, 32)
                 net.writeUInt(#scan_info.components, 4)
                 for _, sc in ipairs(scan_info.components) do
                     local fc = frame_info.components[sc.selector]
-                    
                     net.writeUInt(sc.selector, 8)
                     net.writeUInt(fc.h_samp, 4)
                     net.writeUInt(fc.v_samp, 4)
                     net.writeUInt(fc.qt_id, 4)
                     net.writeUInt(sc.dc_table, 4)
-               
                     net.writeUInt(sc.ac_table, 4)
                 end
                 net.writeUInt(#quant_tables, 4)
                 for _, tbl in ipairs(quant_tables) do
                     net.writeUInt(tbl.dest_id, 4)
-                   
                     for r=1,8 do for c=1,8 do net.writeUInt(tbl.table[r][c], 16) end end
                 end
                 net.writeUInt(#huff_tables, 4)
                 for _, tbl in ipairs(huff_tables) do
                     net.writeUInt(tbl.table_class, 4)
-               
                     net.writeUInt(tbl.dest_id, 4)
                     for bits=1,16 do
                         local count = 0
                         for _,_ in pairs(tbl.decode_table[bits] or {}) do count = count + 1 end
-         
                         net.writeUInt(count, 8)
                         for code, symbol in pairs(tbl.decode_table[bits] or {}) do
                             net.writeUInt(code, 16)
-                        
                             net.writeUInt(symbol, 8)
                         end
                     end
                 end
                 net.writeUInt(restart_interval, 16)
-               
                 net.writeUInt(#scan_data_raw, 32)
             net.send()
 
@@ -324,13 +296,11 @@ if CLIENT then
             local curChunk = 1
             timer.create("JPEGChnk", 0.5, chunks, function()
                 local dataStr = string.sub(scan_data_raw, (curChunk-1)*chunkSize+1, curChunk*chunkSize)
-   
                 net.start("JPEGScan")
                     net.writeUInt(#dataStr, 32)
                     net.writeData(dataStr, #dataStr)
                 net.send()
                 curChunk = curChunk + 1
-         
             end)
         end
     end)
@@ -363,7 +333,6 @@ if SERVER then
     local RestartInterval = 0
     local Max_H_Samp, Max_V_Samp, MCU_Size_X, MCU_Size_Y, Num_MCU_X, Num_MCU_Y = 1,1,8,8,0,0
     
-   
     local T1D = {}
     for pixel = 1, 8 do
         T1D[pixel] = {}
@@ -537,8 +506,7 @@ if SERVER then
             local c7 = d7
             local c8 = c5 - c6
             
-            local b0 = c0 
-            + c3
+            local b0 = c0 + c3
             local b1 = c1 + c2
             local b2 = c1 - c2
             local b3 = c0 - c3
@@ -582,7 +550,6 @@ if SERVER then
 
     local function get_signed_value(bits, num_bits)
         if num_bits==0 then return 0 end
-    
         local half = bit.lshift(1, num_bits-1)
         if bits < half then return bits - bit.lshift(1, num_bits) + 1 end
         return bits
@@ -629,15 +596,13 @@ if SERVER then
         Num_MCU_Y = math.ceil(Meta.height / MCU_Size_Y)
 
         local numQT = net.readUInt(4)
-        for i=1,numQT 
-        do
+        for i=1,numQT do
             local id = net.readUInt(4)
             QuantTables[id] = {}
             for r=1,8 do
                 QuantTables[id][r] = {}
                 for c=1,8 do QuantTables[id][r][c] = net.readUInt(16) end
             end
-     
         end
 
         local numHT = net.readUInt(4)
@@ -685,7 +650,6 @@ if SERVER then
     --Decoding MCUs individually prevents the chip from crashing.
     local function decode_mcu()
         if MCU_Index >= Num_MCU_X * Num_MCU_Y then return false end
- 
         if RestartInterval > 0 and MCU_Index > 0 and (MCU_Index % RestartInterval == 0) then
             bits_remaining = 0
             for i = 1, #Meta.components do
@@ -693,8 +657,7 @@ if SERVER then
             end
         end
 
-        local mcu_row 
-        = math.floor(MCU_Index / Num_MCU_X)
+        local mcu_row = math.floor(MCU_Index / Num_MCU_X)
         local mcu_col = MCU_Index % Num_MCU_X
         MCU_Index = MCU_Index + 1
 
@@ -713,13 +676,11 @@ if SERVER then
 
             for du_row=0,comp.v_samp-1 do
                 for du_col=0,comp.h_samp-1 do
-    
                     local cat = huff_decode(h_dc)
                     if cat == nil then return false end
                     local diff = get_signed_value(read_bits(cat), cat)
                     Predictions[comp_idx] = Predictions[comp_idx] + diff
 
-      
                     local coeff = {}
                     for i=1,64 do coeff[i] = 0 end
                     coeff[1] = Predictions[comp_idx]
@@ -734,7 +695,6 @@ if SERVER then
                         local size = bit.band(rs, 15)
                         if size == 0 then
                             if run == 15 then k = k + 16 else break end
-   
                         else
                             k = k + run
                             if k <= 64 then
@@ -742,7 +702,6 @@ if SERVER then
                                 coeff[k] = get_signed_value(read_bits(size), size)
                             end
                             k = k + 1
-                    
                         end
                     end
 
@@ -756,9 +715,7 @@ if SERVER then
                             aan_block[(r-1)*8 + c] = coeff[i] * qt[r][c]
    
                         end
-
                         IDCT2(aan_block)
-
                         local base_y = du_row * 8
                         local base_x 
                         = du_col * 8
@@ -768,7 +725,6 @@ if SERVER then
                             1) * 8
                             for x = 1, 8 do
                                 row_out[base_x + x - 1] = aan_block[base_aan + x]
-                         
                             end
                         end
                     else
@@ -778,7 +734,6 @@ if SERVER then
                         
                         for i=1,64 do
                             local r,c = zigzag[i][1], zigzag[i][2]
-              
                             dct_mat[r][c] = coeff[i] * qt[r][c]
                         end
 
@@ -787,12 +742,10 @@ if SERVER then
                             row = inter_mat[y]
                             row[1],row[2],row[3],row[4],row[5],row[6],row[7],row[8] = 0,0,0,0,0,0,0,0
                         end
-                        
-                    
+
                         for u = 1, 8 do
                             for v = 1, 8 do
                                 local c = dct_mat[v][u]
-                       
                                 if c ~= 0 then
                                     for y = 1, 8 do
                                         inter_mat[y][u] = inter_mat[y][u] + c * T1D[y][v]
@@ -812,7 +765,6 @@ if SERVER then
                             local i1, i2, i3, i4, i5, i6, i7, i8 = inter_row[1], inter_row[2], inter_row[3], inter_row[4], inter_row[5], inter_row[6], inter_row[7], inter_row[8]
                             for x = 1, 8 do
                                 local tx = T1D[x]
-              
                                 row_out[base_x + x - 1] = i1 * tx[1] + i2 * tx[2] + i3 * tx[3] + i4 * tx[4] + i5 * tx[5] + i6 * tx[6] + i7 * tx[7] + i8 * tx[8]
                             end
                   
@@ -825,7 +777,6 @@ if SERVER then
         end
 
         local base_y = mcu_row * MCU_Size_Y
-        
         local base_x = mcu_col * MCU_Size_X
         local max_h = math.min(MCU_Size_Y, Meta.height - base_y)
         local max_w = math.min(MCU_Size_X, Meta.width - base_x)
@@ -840,17 +791,14 @@ if SERVER then
                     local cy_y = MCU_Data[1].matrix[math.floor(y * MCU_Data[1].v_samp / Max_V_Samp)][math.floor(x * MCU_Data[1].h_samp / Max_H_Samp)]
                     local gray = math.clamp(cy_y + 128, 0, 255)
                     r, g, b = gray, gray, gray
-         
                 else
                     local cy_y = MCU_Data[1].matrix[math.floor(y * MCU_Data[1].v_samp / Max_V_Samp)][math.floor(x * MCU_Data[1].h_samp / Max_H_Samp)]
                     local cb_y = MCU_Data[2].matrix[math.floor(y * MCU_Data[2].v_samp / Max_V_Samp)][math.floor(x * MCU_Data[2].h_samp / Max_H_Samp)]
                     local cr_y = MCU_Data[3].matrix[math.floor(y * MCU_Data[3].v_samp / Max_V_Samp)][math.floor(x * MCU_Data[3].h_samp / 
                     Max_H_Samp)]
-
                     r = math.clamp(cy_y + 1.402 * cr_y + 128, 0, 255)
                     g = math.clamp(cy_y - 0.344136 * cb_y - 0.714136 * cr_y + 128, 0, 255)
                     b = math.clamp(cy_y + 1.772 * cb_y + 128, 0, 255)
-      
                 end
                 screen[(base_y + y) * Meta.width + (base_x + x)] = math.floor(r)*65536 + math.floor(g)*256 + math.floor(b)
              end
@@ -860,7 +808,6 @@ if SERVER then
 
     hook.add("tick", "JPEGDraw", function()
         if not IsDecoding then return end
-       
         while cpuAverage() * 1000 < OpsLimit do
             if not decode_mcu() then
                 IsDecoding = false
@@ -885,7 +832,6 @@ if SERVER then
                                 if cur_x > wm_w then break end
                                 local char = string.sub(line, cur_x, cur_x)
                                 local color = (char == "#") and 0xFFFFFF or 0x000000
-                                
                                 local px = cur_x - 1
                                 local py = start_y + cur_y
                                 screen[py * Meta.width + px] = color
@@ -894,7 +840,6 @@ if SERVER then
                         end
                     end
                 end
-                
                 break
             end
         end
